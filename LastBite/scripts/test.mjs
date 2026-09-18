@@ -1,0 +1,28 @@
+import assert from 'node:assert/strict';
+import {api,nextDay} from '../src/worker.mjs';
+import {database} from './sqlite.mjs';
+const env={DB:database(),VENDOR_ACCESS_KEY:'test-private-key'},date=nextDay();
+let n=0;const token=()=>String(++n).padStart(64,'0');
+async function call(path,{body,customer=token(),operator=false}={}){const r=await api(new Request('https://lastbite.test'+path,{method:body?'POST':'GET',headers:{'X-Customer-Token':customer,...(operator?{'X-Vendor-Key':env.VENDOR_ACCESS_KEY}:{}),...(body?{'Content-Type':'application/json','Origin':'https://lastbite.test'}:{})},...(body?{body:JSON.stringify(body)}:{})}),env);return {status:r.status,data:await r.json()}}
+assert.equal(nextDay(new Date('2026-09-18T12:29:00Z')),'2026-09-18');assert.equal(nextDay(new Date('2026-09-18T12:30:00Z')),'2026-09-19');
+assert.equal((await call('/api/vendor')).status,401);
+assert.equal((await call('/api/orders',{body:{vendor:'brown',date,name:'Tester',agreed:true}})).status,409);
+assert.equal((await call('/api/vendor/stock',{operator:true,body:{vendor:'brown',date,quota:3,address:'Sample pickup address',confirmed:true}})).status,200);
+const customers=Array.from({length:12},token);const attempts=await Promise.all(customers.map(customer=>call('/api/orders',{customer,body:{vendor:'brown',date,name:'Tester',agreed:true}})));
+assert.equal(attempts.filter(r=>r.status===201).length,3);assert.equal(attempts.filter(r=>r.status===409).length,9);
+const index=attempts.findIndex(r=>r.status===201),customer=customers[index],id=attempts[index].data.id;
+assert.equal((await call('/api/orders',{customer})).data.orders.length,1);assert.equal((await call('/api/orders')).data.orders.length,0);
+assert.equal((await call('/api/orders/cancel',{body:{id}})).status,404);
+assert.equal((await call('/api/vendor/stock',{operator:true,body:{vendor:'brown',date,quota:2,address:'',confirmed:true}})).status,409);
+assert.equal((await call('/api/orders/cancel',{customer,body:{id}})).status,200);
+assert.equal((await call('/api/orders/cancel',{customer,body:{id}})).status,409);
+assert.equal((await call('/api/orders',{body:{vendor:'brown',date,name:'Replacement',agreed:true}})).status,201);
+assert.equal((await call('/api/vendor/stock',{operator:true,body:{vendor:'brown',date,quota:3,address:'',confirmed:false}})).status,200);
+assert.equal((await call('/api/orders',{body:{vendor:'brown',date,name:'Paused',agreed:true}})).status,409);
+const otherId=attempts.filter(r=>r.status===201)[1].data.id;
+assert.equal((await call('/api/vendor/order',{operator:true,body:{id:otherId,status:'missed'}})).status,409);
+assert.equal((await call('/api/vendor/order',{operator:true,body:{id:otherId,status:'collected'}})).status,200);
+assert.equal((await call('/api/vendor/order',{operator:true,body:{id:otherId,status:'vendor_cancelled'}})).status,409);
+assert.equal((await call('/api/feedback',{body:{intent:'Maybe',comment:'Clear portions help.'}})).status,201);
+assert.equal((await call('/api/orders',{body:{vendor:'brown',date:'2020-01-01',name:'Old',agreed:true}})).status,400);
+console.log('PASS: IST cutoff, operator authentication, confirmed quotas, 12 competing reservations / 3 bags, customer isolation, cancellation release, quota protection, paused sales, pickup status and feedback.');env.DB.close();
